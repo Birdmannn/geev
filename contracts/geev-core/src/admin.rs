@@ -1,3 +1,4 @@
+use crate::profile::{ProfileContract, SLASH_AMOUNT};
 use crate::types::{DataKey, Error, GiveawayStatus, HelpRequestStatus};
 use crate::utils::validate_fee;
 use crate::{access::check_admin, types::HelpRequest};
@@ -144,7 +145,9 @@ impl AdminContract {
     }
 
     /// Resolve an appeal for suspended content - callable only by Admin
-    /// Allows admin to restore the content or keep it suspended
+    /// Allows admin to restore the content or keep it suspended.
+    /// When `restore` is true, the author's reputation is credited back by
+    /// [`SLASH_AMOUNT`] (reversing the auto-suspend slash).
     pub fn resolve_appeal(env: Env, target_id: u64, restore: bool) {
         check_admin(&env);
 
@@ -152,6 +155,7 @@ impl AdminContract {
         let request_key = DataKey::HelpRequest(target_id);
 
         let mut resolved = false;
+        let mut author_to_restore: Option<Address> = None;
 
         // Try Giveaway first.
         if let Some(mut giveaway) = env
@@ -160,11 +164,12 @@ impl AdminContract {
             .get::<DataKey, crate::types::Giveaway>(&giveaway_key)
         {
             if giveaway.status == GiveawayStatus::UnderAppeal {
-                giveaway.status = if restore {
-                    GiveawayStatus::Active
+                if restore {
+                    giveaway.status = GiveawayStatus::Active;
+                    author_to_restore = Some(giveaway.creator.clone());
                 } else {
-                    GiveawayStatus::Suspended
-                };
+                    giveaway.status = GiveawayStatus::Suspended;
+                }
                 env.storage().persistent().set(&giveaway_key, &giveaway);
                 resolved = true;
             }
@@ -178,11 +183,12 @@ impl AdminContract {
                 .get::<DataKey, crate::types::HelpRequest>(&request_key)
             {
                 if request.status == HelpRequestStatus::UnderAppeal {
-                    request.status = if restore {
-                        HelpRequestStatus::Open
+                    if restore {
+                        request.status = HelpRequestStatus::Open;
+                        author_to_restore = Some(request.creator.clone());
                     } else {
-                        HelpRequestStatus::Suspended
-                    };
+                        request.status = HelpRequestStatus::Suspended;
+                    }
                     env.storage().persistent().set(&request_key, &request);
                     resolved = true;
                 }
@@ -190,6 +196,9 @@ impl AdminContract {
         }
 
         if resolved {
+            if let Some(author) = author_to_restore {
+                ProfileContract::restore_reputation(&env, author, SLASH_AMOUNT);
+            }
             AppealResolved {
                 target_id,
                 restored: restore,

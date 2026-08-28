@@ -4495,6 +4495,271 @@ fn test_file_appeal_emits_content_appealed_event() {
     );
 }
 
+// ── Reputation slash & decay ──────────────────────────────────────────────────
+
+use crate::profile::{DECAY_PERIOD_SECONDS, DECAY_PER_PERIOD, SLASH_AMOUNT};
+
+#[test]
+fn test_auto_suspend_slashes_author_reputation() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(GovernanceContract, ());
+    let gov = GovernanceContractClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+
+    let giveaway_id: u64 = 77;
+    let creator = Address::generate(&env);
+    seed_active_giveaway_with_creator(&env, &contract_id, giveaway_id, &token, &creator);
+
+    let starting_rep: u64 = 20;
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::Reputation(creator.clone()), &starting_rep);
+        env.storage().persistent().set(
+            &DataKey::ReputationUpdatedAt(creator.clone()),
+            &env.ledger().timestamp(),
+        );
+    });
+
+    suspend_via_flags(&gov, &env, ContentType::Giveaway, giveaway_id);
+
+    env.as_contract(&contract_id, || {
+        let score: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Reputation(creator.clone()))
+            .unwrap_or(0);
+        assert_eq!(score, starting_rep - SLASH_AMOUNT);
+    });
+}
+
+#[test]
+fn test_slash_reputation_never_underflows() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(GovernanceContract, ());
+    let gov = GovernanceContractClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+
+    let giveaway_id: u64 = 78;
+    let creator = Address::generate(&env);
+    seed_active_giveaway_with_creator(&env, &contract_id, giveaway_id, &token, &creator);
+
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::Reputation(creator.clone()), &2u64);
+        env.storage().persistent().set(
+            &DataKey::ReputationUpdatedAt(creator.clone()),
+            &env.ledger().timestamp(),
+        );
+    });
+
+    suspend_via_flags(&gov, &env, ContentType::Giveaway, giveaway_id);
+
+    env.as_contract(&contract_id, || {
+        let score: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Reputation(creator.clone()))
+            .unwrap_or(0);
+        assert_eq!(score, 0);
+    });
+}
+
+#[test]
+fn test_successful_appeal_restores_slashed_reputation() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin_contract_id = env.register(AdminContract, ());
+    let admin_client = AdminContractClient::new(&env, &admin_contract_id);
+
+    let admin = Address::generate(&env);
+    env.as_contract(&admin_contract_id, || {
+        env.storage().instance().set(&DataKey::Admin, &admin);
+    });
+
+    let token_admin = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+
+    let giveaway_id: u64 = 79;
+    let creator = Address::generate(&env);
+
+    let post_slash: u64 = 10;
+    env.as_contract(&admin_contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::Reputation(creator.clone()), &post_slash);
+        env.storage().persistent().set(
+            &DataKey::ReputationUpdatedAt(creator.clone()),
+            &env.ledger().timestamp(),
+        );
+
+        let giveaway = Giveaway {
+            id: giveaway_id,
+            creator: creator.clone(),
+            token: token.clone(),
+            amount: 500,
+            title: String::from_str(&env, "Appeal Restore Rep"),
+            participant_count: 0,
+            end_time: env.ledger().timestamp() + 3600,
+            status: GiveawayStatus::UnderAppeal,
+            winner_count: 1,
+            winners: Vec::new(&env),
+            verification_type: 0,
+            min_reputation: 0,
+            selection_method: SelectionMethod::Random,
+            claim_deadline: 0,
+            claimed_count: 0,
+            fee_bps: None,
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::Giveaway(giveaway_id), &giveaway);
+    });
+
+    admin_client.resolve_appeal(&giveaway_id, &true);
+
+    env.as_contract(&admin_contract_id, || {
+        let score: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Reputation(creator.clone()))
+            .unwrap_or(0);
+        assert_eq!(score, post_slash + SLASH_AMOUNT);
+    });
+}
+
+#[test]
+fn test_reputation_decays_over_ledger_time() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(ProfileContract, ());
+    let client = ProfileContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    let start_ts = 1_000_000u64;
+    env.ledger().with_mut(|li| {
+        li.timestamp = start_ts;
+    });
+
+    let starting: u64 = 10;
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::Reputation(user.clone()), &starting);
+        env.storage()
+            .persistent()
+            .set(&DataKey::ReputationUpdatedAt(user.clone()), &start_ts);
+    });
+
+    env.ledger().with_mut(|li| {
+        li.timestamp = start_ts + DECAY_PERIOD_SECONDS * 2;
+    });
+
+    let score = client.get_reputation(&user);
+    assert_eq!(score, starting - DECAY_PER_PERIOD * 2);
+}
+
+#[test]
+fn test_reputation_decay_never_goes_below_zero() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(ProfileContract, ());
+    let client = ProfileContractClient::new(&env, &contract_id);
+    let user = Address::generate(&env);
+
+    let start_ts = 1_000_000u64;
+    env.ledger().with_mut(|li| {
+        li.timestamp = start_ts;
+    });
+
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::Reputation(user.clone()), &1u64);
+        env.storage()
+            .persistent()
+            .set(&DataKey::ReputationUpdatedAt(user.clone()), &start_ts);
+    });
+
+    env.ledger().with_mut(|li| {
+        li.timestamp = start_ts + DECAY_PERIOD_SECONDS * 100;
+    });
+
+    assert_eq!(client.get_reputation(&user), 0);
+}
+
+#[test]
+fn test_min_reputation_gating_uses_slashed_score() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let contract_id = env.register(GiveawayContract, ());
+    let client = GiveawayContractClient::new(&env, &contract_id);
+
+    let token_admin = Address::generate(&env);
+    let mock_token = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    let token_admin_client = token::StellarAssetClient::new(&env, &mock_token);
+
+    let creator = Address::generate(&env);
+    let participant = Address::generate(&env);
+    token_admin_client.mint(&creator, &1000);
+
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .set(&DataKey::AllowedToken(mock_token.clone()), &true);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Reputation(participant.clone()), &5u64);
+        env.storage().persistent().set(
+            &DataKey::ReputationUpdatedAt(participant.clone()),
+            &env.ledger().timestamp(),
+        );
+    });
+
+    env.as_contract(&contract_id, || {
+        crate::profile::ProfileContract::slash_reputation(&env, participant.clone(), SLASH_AMOUNT);
+    });
+
+    let giveaway_id = client.create_giveaway(
+        &creator,
+        &mock_token,
+        &500,
+        &String::from_str(&env, "Gated After Slash"),
+        &60,
+        &1,
+        &Some(ParticipantVerification {
+            allowlist: Vec::new(&env),
+            min_reputation: 5,
+            uses_reputation: true,
+        }),
+        &None,
+    );
+
+    let result = client.try_enter_giveaway(&participant, &giveaway_id);
+    assert!(result.is_err());
+}
+
 // ── Configurable fee tiers ────────────────────────────────────────────────────
 
 #[test]
@@ -4620,7 +4885,6 @@ fn test_fee_precedence_giveaway_override_wins() {
         env.storage()
             .instance()
             .set(&DataKey::AllowedToken(mock_token.clone()), &true);
-        // Global 5%, token 2% — giveaway override 0 should win
         env.storage().instance().set(&DataKey::Fee, &500u32);
         env.storage()
             .instance()
@@ -4670,10 +4934,10 @@ fn test_fee_precedence_token_over_global() {
         env.storage()
             .instance()
             .set(&DataKey::AllowedToken(mock_token.clone()), &true);
-        env.storage().instance().set(&DataKey::Fee, &500u32); // 5%
+        env.storage().instance().set(&DataKey::Fee, &500u32);
         env.storage()
             .instance()
-            .set(&DataKey::TokenFee(mock_token.clone()), &200u32); // 2%
+            .set(&DataKey::TokenFee(mock_token.clone()), &200u32);
     });
 
     let giveaway_id = client.create_giveaway(
@@ -4692,7 +4956,6 @@ fn test_fee_precedence_token_over_global() {
     client.pick_winner(&giveaway_id);
     client.claim_prize(&giveaway_id, &winner);
 
-    // 2% of 500 = 10 fee → winner 490
     assert_eq!(token_client.balance(&winner), 490);
     assert_eq!(token_client.balance(&contract_id), 10);
 }
@@ -4720,7 +4983,7 @@ fn test_fee_precedence_global_over_default() {
         env.storage()
             .instance()
             .set(&DataKey::AllowedToken(mock_token.clone()), &true);
-        env.storage().instance().set(&DataKey::Fee, &200u32); // 2%
+        env.storage().instance().set(&DataKey::Fee, &200u32);
     });
 
     let giveaway_id = client.create_giveaway(
@@ -4811,7 +5074,7 @@ fn test_midflight_fee_change_does_not_alter_collected_fees() {
         env.storage()
             .instance()
             .set(&DataKey::AllowedToken(mock_token.clone()), &true);
-        env.storage().instance().set(&DataKey::Fee, &100u32); // 1%
+        env.storage().instance().set(&DataKey::Fee, &100u32);
     });
 
     let giveaway_id = client.create_giveaway(
@@ -4838,7 +5101,6 @@ fn test_midflight_fee_change_does_not_alter_collected_fees() {
     });
     assert_eq!(collected_before, 5);
 
-    // Mid-flight global fee change must not rewrite already-collected fees
     env.as_contract(&contract_id, || {
         env.storage().instance().set(&DataKey::Fee, &500u32);
     });
