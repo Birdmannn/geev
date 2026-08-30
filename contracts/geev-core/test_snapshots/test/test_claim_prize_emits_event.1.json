@@ -38,7 +38,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                 },
                 {
-                  "i128": "1000"
+                  "i128": "10000"
                 }
               ]
             }
@@ -67,7 +67,7 @@
                   "i128": "500"
                 },
                 {
-                  "string": "Token Fee"
+                  "string": "Event Test"
                 },
                 {
                   "u64": "60"
@@ -149,9 +149,7 @@
           "sub_invocations": []
         }
       ]
-    ],
-    [],
-    []
+    ]
   ],
   "ledger": {
     "protocol_version": 23,
@@ -311,7 +309,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "i128": "10"
+                  "i128": "5"
                 }
               }
             },
@@ -448,7 +446,7 @@
                         "symbol": "title"
                       },
                       "val": {
-                        "string": "Token Fee"
+                        "string": "Event Test"
                       }
                     },
                     {
@@ -735,7 +733,7 @@
                           ]
                         },
                         "val": {
-                          "u32": 500
+                          "u32": 100
                         }
                       },
                       {
@@ -748,21 +746,6 @@
                         },
                         "val": {
                           "u64": "1"
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
-                              "symbol": "TokenFee"
-                            },
-                            {
-                              "address": "CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "u32": 200
                         }
                       }
                     ]
@@ -949,7 +932,7 @@
                         "symbol": "amount"
                       },
                       "val": {
-                        "i128": "10"
+                        "i128": "5"
                       }
                     },
                     {
@@ -1019,7 +1002,7 @@
                         "symbol": "amount"
                       },
                       "val": {
-                        "i128": "500"
+                        "i128": "9500"
                       }
                     },
                     {
@@ -1089,7 +1072,7 @@
                         "symbol": "amount"
                       },
                       "val": {
-                        "i128": "490"
+                        "i128": "495"
                       }
                     },
                     {
@@ -1252,5 +1235,68 @@
       ]
     ]
   },
-  "events": []
+  "events": [
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF",
+        "type_": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "transfer"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+              },
+              {
+                "string": "aaa:GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGO6V"
+              }
+            ],
+            "data": {
+              "i128": "495"
+            }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+        "type_": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "giveaway"
+              },
+              {
+                "symbol": "claimed"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+              }
+            ],
+            "data": {
+              "vec": [
+                {
+                  "u64": "1"
+                },
+                {
+                  "i128": "495"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "failed_call": false
+    }
+  ]
 }

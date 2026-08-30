@@ -38,7 +38,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                 },
                 {
-                  "i128": "1000"
+                  "i128": "10000"
                 }
               ]
             }
@@ -67,7 +67,7 @@
                   "i128": "500"
                 },
                 {
-                  "string": "Token Fee"
+                  "string": "Full Fee"
                 },
                 {
                   "u64": "60"
@@ -311,7 +311,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "i128": "10"
+                  "i128": "500"
                 }
               }
             },
@@ -448,7 +448,7 @@
                         "symbol": "title"
                       },
                       "val": {
-                        "string": "Token Fee"
+                        "string": "Full Fee"
                       }
                     },
                     {
@@ -735,7 +735,7 @@
                           ]
                         },
                         "val": {
-                          "u32": 500
+                          "u32": 10000
                         }
                       },
                       {
@@ -748,21 +748,6 @@
                         },
                         "val": {
                           "u64": "1"
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
-                              "symbol": "TokenFee"
-                            },
-                            {
-                              "address": "CBUSYNQKASUYFWYC3M2GUEDMX4AIVWPALDBYJPNK6554BREHTGZ2IUNF"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "u32": 200
                         }
                       }
                     ]
@@ -949,7 +934,7 @@
                         "symbol": "amount"
                       },
                       "val": {
-                        "i128": "10"
+                        "i128": "500"
                       }
                     },
                     {
@@ -1019,7 +1004,7 @@
                         "symbol": "amount"
                       },
                       "val": {
-                        "i128": "500"
+                        "i128": "9500"
                       }
                     },
                     {
@@ -1089,7 +1074,7 @@
                         "symbol": "amount"
                       },
                       "val": {
-                        "i128": "490"
+                        "i128": "0"
                       }
                     },
                     {

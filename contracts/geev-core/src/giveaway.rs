@@ -37,6 +37,17 @@ pub struct GiveawayWinnerSelected {
     prize_amount: i128,
 }
 
+/// Emitted when a winner successfully claims their prize (`claim_prize`). Topics are
+/// fixed `giveaway`, `claimed`, plus the winner address; data is
+/// `[giveaway_id, net_amount]` as a Vec for downstream indexing.
+#[contractevent(topics = ["giveaway", "claimed"], data_format = "vec")]
+pub struct GiveawayPrizeClaimed {
+    #[topic]
+    winner: Address,
+    giveaway_id: u64,
+    net_amount: i128,
+}
+
 #[allow(clippy::too_many_arguments)]
 #[contractimpl]
 impl GiveawayContract {
@@ -403,6 +414,13 @@ impl GiveawayContract {
             let token_client = token::Client::new(&env, &giveaway.token);
             token_client.transfer(&env.current_contract_address(), &winner, &net_amount);
             Self::add_collected_fees(&env, &giveaway.token, fee_amount);
+
+            GiveawayPrizeClaimed {
+                winner: winner.clone(),
+                giveaway_id,
+                net_amount,
+            }
+            .publish(&env);
 
             env.storage().persistent().set(&claimed_key, &true);
             giveaway.claimed_count += 1;
