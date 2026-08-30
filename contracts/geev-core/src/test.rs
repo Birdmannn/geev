@@ -4552,6 +4552,7 @@ fn test_pick_winner_twice_fails() {
         &60,
         &1,
         &None,
+        &None, // fee_bps
     );
 
     let participant = Address::generate(&env);
@@ -4581,6 +4582,7 @@ fn test_claim_prize_emits_event() {
         &60,
         &1,
         &None,
+        &None, // fee_bps
     );
 
     let winner = Address::generate(&env);
@@ -4632,6 +4634,7 @@ fn test_claim_prize_zero_fee_pays_full_amount() {
         &60,
         &1,
         &None,
+        &None, // fee_bps
     );
 
     let winner = Address::generate(&env);
@@ -4662,6 +4665,7 @@ fn test_claim_prize_full_fee_pays_zero_net() {
         &60,
         &1,
         &None,
+        &None, // fee_bps
     );
 
     let winner = Address::generate(&env);
@@ -4693,6 +4697,7 @@ fn test_recover_on_completed_giveaway_fails() {
         &60,
         &1,
         &None,
+        &None, // fee_bps
     );
 
     let winner = Address::generate(&env);
@@ -4729,6 +4734,7 @@ fn test_recover_after_all_claimed_is_noop() {
         &60,
         &2,
         &None,
+        &None, // fee_bps
     );
 
     let p1 = Address::generate(&env);
@@ -4783,6 +4789,7 @@ fn test_recover_by_admin_after_expiry_succeeds() {
         &60,
         &1,
         &None,
+        &None, // fee_bps
     );
 
     let winner = Address::generate(&env);
@@ -4828,6 +4835,7 @@ fn test_claim_at_deadline_boundary() {
         &60,
         &1,
         &None,
+        &None, // fee_bps
     );
 
     let winner = Address::generate(&env);
@@ -4859,6 +4867,7 @@ fn test_claim_one_second_past_deadline_fails() {
         &60,
         &1,
         &None,
+        &None, // fee_bps
     );
 
     let winner = Address::generate(&env);
@@ -4889,6 +4898,7 @@ fn test_status_stays_claimable_after_first_of_two_claims() {
         &60,
         &2,
         &None,
+        &None, // fee_bps
     );
 
     let p1 = Address::generate(&env);
@@ -4960,6 +4970,7 @@ fn test_winner_gross_share_remainder_distribution() {
         &60,
         &3,
         &None,
+        &None, // fee_bps
     );
 
     // Need at least 3 participants.
@@ -5015,6 +5026,7 @@ fn test_pick_winner_insufficient_participants_fails() {
         &60,
         &3,
         &None,
+        &None, // fee_bps
     );
 
     client.enter_giveaway(&Address::generate(&env), &giveaway_id);
@@ -5042,6 +5054,7 @@ fn test_pick_winner_zero_participants_fails() {
         &60,
         &1,
         &None,
+        &None, // fee_bps
     );
 
     env.ledger().with_mut(|li| li.timestamp += 100);
@@ -5068,6 +5081,7 @@ fn test_multi_winner_equal_split() {
         &60,
         &4,
         &None,
+        &None, // fee_bps
     );
 
     for _ in 0..4 {
@@ -5113,6 +5127,7 @@ fn test_create_giveaway_zero_winner_count_fails() {
         &60,
         &0, // winner_count = 0
         &None,
+        &None, // fee_bps
     );
 }
 
@@ -5133,6 +5148,7 @@ fn test_create_giveaway_zero_amount_accepted() {
         &60,
         &1,
         &None,
+        &None, // fee_bps
     );
 
     // Giveaway is created and stored.
@@ -5165,6 +5181,7 @@ fn test_recover_unclaimed_returns_full_gross_share_no_fee() {
         &60,
         &1,
         &None,
+        &None, // fee_bps
     );
 
     let winner = Address::generate(&env);
@@ -5214,6 +5231,7 @@ fn test_reputation_not_incremented_on_recovery() {
         &60,
         &1,
         &None,
+        &None, // fee_bps
     );
 
     let winner = Address::generate(&env);
@@ -5255,6 +5273,7 @@ fn test_manual_winners_non_participant_fails() {
         &1,
         &None,
         &SelectionMethod::Manual,
+        &None, // fee_bps
     );
 
     let real_participant = Address::generate(&env);
@@ -5288,6 +5307,7 @@ fn test_manual_winners_duplicate_fails() {
         &2,
         &None,
         &SelectionMethod::Manual,
+        &None, // fee_bps
     );
 
     let p1 = Address::generate(&env);
@@ -5323,6 +5343,7 @@ fn test_finalize_merit_winners_on_random_giveaway_fails() {
         &60,
         &1,
         &None,
+        &None, // fee_bps
     );
 
     let participant = Address::generate(&env);
@@ -5591,7 +5612,7 @@ fn test_min_reputation_gating_uses_slashed_score() {
             min_reputation: 5,
             uses_reputation: true,
         }),
-        &None,
+        &None, // fee_bps
     );
 
     let result = client.try_enter_giveaway(&participant, &giveaway_id);
@@ -5786,7 +5807,7 @@ fn test_fee_precedence_token_over_global() {
         &60,
         &1,
         &None,
-        &None,
+        &None, // fee_bps
     );
 
     client.enter_giveaway(&winner, &giveaway_id);
@@ -5832,7 +5853,7 @@ fn test_fee_precedence_global_over_default() {
         &60,
         &1,
         &None,
-        &None,
+        &None, // fee_bps
     );
 
     client.enter_giveaway(&winner, &giveaway_id);
@@ -5923,7 +5944,7 @@ fn test_midflight_fee_change_does_not_alter_collected_fees() {
         &60,
         &1,
         &None,
-        &None,
+        &None, // fee_bps
     );
 
     client.enter_giveaway(&winner, &giveaway_id);
