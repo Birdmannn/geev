@@ -3950,3 +3950,841 @@ fn test_file_appeal_emits_content_appealed_event() {
         "ContentAppealed event was not emitted"
     );
 }
+
+// ── New edge-case tests: giveaway claim lifecycle ─────────────────────────────
+
+/// Helper: create a fully-bootstrapped giveaway contract with a whitelisted
+/// token and a fee already stored in instance storage. Returns
+/// `(contract_id, client, token_client, token_address, creator_address)`.
+fn setup_giveaway_env(
+    env: &Env,
+    fee_bps: u32,
+) -> (
+    Address,
+    GiveawayContractClient<'_>,
+    token::Client<'_>,
+    Address, // token address
+    Address, // creator
+) {
+    let contract_id = env.register(GiveawayContract, ());
+    let client = GiveawayContractClient::new(env, &contract_id);
+
+    let token_admin = Address::generate(env);
+    let mock_token = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+
+    let token_client = token::Client::new(env, &mock_token);
+    let token_asset_client = token::StellarAssetClient::new(env, &mock_token);
+
+    let creator = Address::generate(env);
+    token_asset_client.mint(&creator, &10_000);
+
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .set(&DataKey::AllowedToken(mock_token.clone()), &true);
+        env.storage().instance().set(&DataKey::Fee, &fee_bps);
+    });
+
+    (contract_id, client, token_client, mock_token, creator)
+}
+
+// ── #1 – pick_winner cannot be called twice on the same Claimable giveaway ───
+
+#[test]
+#[should_panic]
+fn test_pick_winner_twice_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_contract_id, client, _tc, token, creator) = setup_giveaway_env(&env, 100);
+
+    let giveaway_id = client.create_giveaway(
+        &creator,
+        &token,
+        &500,
+        &String::from_str(&env, "Double Pick"),
+        &60,
+        &1,
+        &None,
+    );
+
+    let participant = Address::generate(&env);
+    client.enter_giveaway(&participant, &giveaway_id);
+    env.ledger().with_mut(|li| li.timestamp += 100);
+
+    client.pick_winner(&giveaway_id);
+    // Must panic – giveaway is now Claimable, not Active.
+    client.pick_winner(&giveaway_id);
+}
+
+// ── #2 – claim_prize emits a PrizeClaimed event ───────────────────────────────
+
+#[test]
+fn test_claim_prize_emits_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (contract_id, client, _tc, token, creator) = setup_giveaway_env(&env, 100); // 1 %
+
+    let amount: i128 = 500;
+    let giveaway_id = client.create_giveaway(
+        &creator,
+        &token,
+        &amount,
+        &String::from_str(&env, "Event Test"),
+        &60,
+        &1,
+        &None,
+    );
+
+    let winner = Address::generate(&env);
+    client.enter_giveaway(&winner, &giveaway_id);
+    env.ledger().with_mut(|li| li.timestamp += 100);
+    client.pick_winner(&giveaway_id);
+    client.claim_prize(&giveaway_id, &winner);
+
+    // net = 500 − 1 % = 495
+    let expected_net: i128 = 495;
+
+    let events = env.events().all();
+    // Topics: symbol "giveaway", symbol "claimed", winner address.
+    let expected_topics: soroban_sdk::Vec<Val> = vec![
+        &env,
+        Symbol::new(&env, "giveaway").into_val(&env),
+        Symbol::new(&env, "claimed").into_val(&env),
+        winner.into_val(&env),
+    ];
+    assert!(
+        events.iter().any(|(ec, topics, data)| {
+            if ec != contract_id || topics != expected_topics.into_val(&env) {
+                return false;
+            }
+            let v: soroban_sdk::Vec<Val> = soroban_sdk::Vec::from_val(&env, &data);
+            let ev_giveaway_id = u64::from_val(&env, &v.get(0).unwrap());
+            let ev_net = i128::from_val(&env, &v.get(1).unwrap());
+            ev_giveaway_id == giveaway_id && ev_net == expected_net
+        }),
+        "GiveawayPrizeClaimed event not found or fields do not match"
+    );
+}
+
+// ── #3 – fee_bps=0 pays the full gross amount ────────────────────────────────
+
+#[test]
+fn test_claim_prize_zero_fee_pays_full_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_contract_id, client, tc, token, creator) = setup_giveaway_env(&env, 0); // 0 %
+
+    let amount: i128 = 500;
+    let giveaway_id = client.create_giveaway(
+        &creator,
+        &token,
+        &amount,
+        &String::from_str(&env, "Zero Fee"),
+        &60,
+        &1,
+        &None,
+    );
+
+    let winner = Address::generate(&env);
+    client.enter_giveaway(&winner, &giveaway_id);
+    env.ledger().with_mut(|li| li.timestamp += 100);
+    client.pick_winner(&giveaway_id);
+    client.claim_prize(&giveaway_id, &winner);
+
+    // With 0 % fee the winner should receive the full gross share.
+    assert_eq!(tc.balance(&winner), amount);
+}
+
+// ── #4 – fee_bps=10000 (100 %) leaves winner with 0 tokens ──────────────────
+
+#[test]
+fn test_claim_prize_full_fee_pays_zero_net() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (contract_id, client, tc, token, creator) = setup_giveaway_env(&env, 10_000); // 100 %
+
+    let amount: i128 = 500;
+    let giveaway_id = client.create_giveaway(
+        &creator,
+        &token,
+        &amount,
+        &String::from_str(&env, "Full Fee"),
+        &60,
+        &1,
+        &None,
+    );
+
+    let winner = Address::generate(&env);
+    client.enter_giveaway(&winner, &giveaway_id);
+    env.ledger().with_mut(|li| li.timestamp += 100);
+    client.pick_winner(&giveaway_id);
+    client.claim_prize(&giveaway_id, &winner);
+
+    assert_eq!(tc.balance(&winner), 0);
+    // All 500 tokens are held as collected fees.
+    assert_eq!(tc.balance(&contract_id), 500);
+}
+
+// ── #5 – recover_unclaimed_prize on an already Completed giveaway fails ──────
+
+#[test]
+#[should_panic]
+fn test_recover_on_completed_giveaway_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_contract_id, client, _tc, token, creator) = setup_giveaway_env(&env, 100);
+
+    let giveaway_id = client.create_giveaway(
+        &creator,
+        &token,
+        &500,
+        &String::from_str(&env, "Already Done"),
+        &60,
+        &1,
+        &None,
+    );
+
+    let winner = Address::generate(&env);
+    client.enter_giveaway(&winner, &giveaway_id);
+    env.ledger().with_mut(|li| li.timestamp += 100);
+    client.pick_winner(&giveaway_id);
+    // The single winner claims → status becomes Completed.
+    client.claim_prize(&giveaway_id, &winner);
+
+    // Any time after claim deadline – must panic with InvalidStatus.
+    env.ledger()
+        .with_mut(|li| li.timestamp += 7 * 24 * 60 * 60 + 1);
+    client.recover_unclaimed_prize(&giveaway_id, &creator);
+}
+
+// ── #6 – recover when all winners already claimed is a no-op ─────────────────
+
+// This situation (all claimed → Completed) is identical to #5: the contract
+// panics with InvalidStatus because the giveaway is Completed, not Claimable.
+// The test below documents and locks that behaviour.
+#[test]
+#[should_panic]
+fn test_recover_after_all_claimed_is_noop() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_contract_id, client, _tc, token, creator) = setup_giveaway_env(&env, 100);
+
+    let giveaway_id = client.create_giveaway(
+        &creator,
+        &token,
+        &600,
+        &String::from_str(&env, "All Claimed"),
+        &60,
+        &2,
+        &None,
+    );
+
+    let p1 = Address::generate(&env);
+    let p2 = Address::generate(&env);
+    let p3 = Address::generate(&env);
+    client.enter_giveaway(&p1, &giveaway_id);
+    client.enter_giveaway(&p2, &giveaway_id);
+    client.enter_giveaway(&p3, &giveaway_id);
+    env.ledger().with_mut(|li| li.timestamp += 100);
+    client.pick_winner(&giveaway_id);
+
+    // Both winners claim inside the window.
+    let winners: Vec<Address> = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get::<DataKey, Giveaway>(&DataKey::Giveaway(giveaway_id))
+            .unwrap()
+            .winners
+            .clone()
+    });
+    client.claim_prize(&giveaway_id, &winners.get(0).unwrap());
+    client.claim_prize(&giveaway_id, &winners.get(1).unwrap());
+
+    // Advance past claim window.
+    env.ledger()
+        .with_mut(|li| li.timestamp += 7 * 24 * 60 * 60 + 1);
+
+    // Must panic – status is Completed, not Claimable.
+    client.recover_unclaimed_prize(&giveaway_id, &creator);
+}
+
+// ── #7 – admin can also call recover_unclaimed_prize after expiry ─────────────
+
+#[test]
+fn test_recover_by_admin_after_expiry_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (contract_id, client, tc, token, creator) = setup_giveaway_env(&env, 100);
+
+    // Plant an admin address.
+    let admin = Address::generate(&env);
+    env.as_contract(&contract_id, || {
+        env.storage().instance().set(&DataKey::Admin, &admin);
+    });
+
+    let giveaway_id = client.create_giveaway(
+        &creator,
+        &token,
+        &500,
+        &String::from_str(&env, "Admin Recovery"),
+        &60,
+        &1,
+        &None,
+    );
+
+    let winner = Address::generate(&env);
+    client.enter_giveaway(&winner, &giveaway_id);
+    env.ledger().with_mut(|li| li.timestamp += 100);
+    client.pick_winner(&giveaway_id);
+
+    env.ledger()
+        .with_mut(|li| li.timestamp += 7 * 24 * 60 * 60 + 1);
+
+    // Admin (not creator) calls recover — should succeed.
+    client.recover_unclaimed_prize(&giveaway_id, &admin);
+
+    // Full unclaimed amount returns to creator (no fee — never claimed).
+    assert_eq!(tc.balance(&creator), 10_000); // 10 000 minted − 500 funded + 500 recovered
+    assert_eq!(tc.balance(&winner), 0);
+
+    env.as_contract(&contract_id, || {
+        let g: Giveaway = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Giveaway(giveaway_id))
+            .unwrap();
+        assert_eq!(g.status, GiveawayStatus::Completed);
+    });
+}
+
+// ── #8 – claim at deadline passes; claim at deadline+1 fails ─────────────────
+
+#[test]
+fn test_claim_at_deadline_boundary() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_cid, client, tc, token, creator) = setup_giveaway_env(&env, 0);
+
+    let amount: i128 = 200;
+    let giveaway_id = client.create_giveaway(
+        &creator,
+        &token,
+        &amount,
+        &String::from_str(&env, "Boundary"),
+        &60,
+        &1,
+        &None,
+    );
+
+    let winner = Address::generate(&env);
+    client.enter_giveaway(&winner, &giveaway_id);
+    env.ledger().with_mut(|li| li.timestamp += 100);
+    client.pick_winner(&giveaway_id);
+
+    // Advance exactly to the deadline.
+    env.ledger().with_mut(|li| li.timestamp += 7 * 24 * 60 * 60);
+
+    // Claim at deadline (timestamp == claim_deadline) must succeed.
+    client.claim_prize(&giveaway_id, &winner);
+    assert_eq!(tc.balance(&winner), amount);
+}
+
+#[test]
+#[should_panic]
+fn test_claim_one_second_past_deadline_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_cid, client, _tc, token, creator) = setup_giveaway_env(&env, 0);
+
+    let giveaway_id = client.create_giveaway(
+        &creator,
+        &token,
+        &200,
+        &String::from_str(&env, "One Second Over"),
+        &60,
+        &1,
+        &None,
+    );
+
+    let winner = Address::generate(&env);
+    client.enter_giveaway(&winner, &giveaway_id);
+    env.ledger().with_mut(|li| li.timestamp += 100);
+    client.pick_winner(&giveaway_id);
+
+    // Advance one second past the deadline.
+    env.ledger()
+        .with_mut(|li| li.timestamp += 7 * 24 * 60 * 60 + 1);
+    client.claim_prize(&giveaway_id, &winner);
+}
+
+// ── #9 – status stays Claimable after the first of two winners claims ─────────
+
+#[test]
+fn test_status_stays_claimable_after_first_of_two_claims() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (contract_id, client, _tc, token, creator) = setup_giveaway_env(&env, 100);
+
+    let giveaway_id = client.create_giveaway(
+        &creator,
+        &token,
+        &400,
+        &String::from_str(&env, "Two Winners"),
+        &60,
+        &2,
+        &None,
+    );
+
+    let p1 = Address::generate(&env);
+    let p2 = Address::generate(&env);
+    let p3 = Address::generate(&env);
+    client.enter_giveaway(&p1, &giveaway_id);
+    client.enter_giveaway(&p2, &giveaway_id);
+    client.enter_giveaway(&p3, &giveaway_id);
+    env.ledger().with_mut(|li| li.timestamp += 100);
+    client.pick_winner(&giveaway_id);
+
+    let winners: Vec<Address> = env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .get::<DataKey, Giveaway>(&DataKey::Giveaway(giveaway_id))
+            .unwrap()
+            .winners
+            .clone()
+    });
+
+    // First winner claims.
+    client.claim_prize(&giveaway_id, &winners.get(0).unwrap());
+
+    // Status must still be Claimable.
+    env.as_contract(&contract_id, || {
+        let g: Giveaway = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Giveaway(giveaway_id))
+            .unwrap();
+        assert_eq!(g.status, GiveawayStatus::Claimable);
+        assert_eq!(g.claimed_count, 1);
+    });
+
+    // Second winner claims → now Completed.
+    client.claim_prize(&giveaway_id, &winners.get(1).unwrap());
+
+    env.as_contract(&contract_id, || {
+        let g: Giveaway = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Giveaway(giveaway_id))
+            .unwrap();
+        assert_eq!(g.status, GiveawayStatus::Completed);
+        assert_eq!(g.claimed_count, 2);
+    });
+}
+
+// ── #10 – remainder-share arithmetic (amount=10, 3 winners) ──────────────────
+//
+// Integer split: base_share = 10 / 3 = 3.
+// Index-0 absorbs the remainder: 10 − 3 × 2 = 4.
+// Indices 1 and 2 each get 3.
+// With 0 % fee the balances must match exactly.
+
+#[test]
+fn test_winner_gross_share_remainder_distribution() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (contract_id, client, tc, token, creator) = setup_giveaway_env(&env, 0); // 0 % fee
+
+    let amount: i128 = 10;
+    let giveaway_id = client.create_giveaway(
+        &creator,
+        &token,
+        &amount,
+        &String::from_str(&env, "Remainder Test"),
+        &60,
+        &3,
+        &None,
+    );
+
+    // Need at least 3 participants.
+    let p1 = Address::generate(&env);
+    let p2 = Address::generate(&env);
+    let p3 = Address::generate(&env);
+    client.enter_giveaway(&p1, &giveaway_id);
+    client.enter_giveaway(&p2, &giveaway_id);
+    client.enter_giveaway(&p3, &giveaway_id);
+    env.ledger().with_mut(|li| li.timestamp += 100);
+    client.pick_winner(&giveaway_id);
+
+    let winners: Vec<Address> = env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .get::<DataKey, Giveaway>(&DataKey::Giveaway(giveaway_id))
+            .unwrap()
+            .winners
+            .clone()
+    });
+
+    for i in 0..3u32 {
+        client.claim_prize(&giveaway_id, &winners.get(i).unwrap());
+    }
+
+    let b0 = tc.balance(&winners.get(0).unwrap());
+    let b1 = tc.balance(&winners.get(1).unwrap());
+    let b2 = tc.balance(&winners.get(2).unwrap());
+
+    // Index-0 gets 4, indices 1 and 2 get 3 each.
+    assert_eq!(b0, 4, "index-0 winner should receive the remainder share");
+    assert_eq!(b1, 3, "index-1 winner should receive the base share");
+    assert_eq!(b2, 3, "index-2 winner should receive the base share");
+    assert_eq!(b0 + b1 + b2, amount, "shares must sum to total amount");
+}
+
+// ── #11 – pick_winner panics when participant_count < winner_count ────────────
+
+#[test]
+#[should_panic]
+fn test_pick_winner_insufficient_participants_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_cid, client, _tc, token, creator) = setup_giveaway_env(&env, 100);
+
+    // Request 3 winners but only 2 participants will enter.
+    let giveaway_id = client.create_giveaway(
+        &creator,
+        &token,
+        &300,
+        &String::from_str(&env, "Too Few"),
+        &60,
+        &3,
+        &None,
+    );
+
+    client.enter_giveaway(&Address::generate(&env), &giveaway_id);
+    client.enter_giveaway(&Address::generate(&env), &giveaway_id);
+
+    env.ledger().with_mut(|li| li.timestamp += 100);
+    client.pick_winner(&giveaway_id);
+}
+
+// ── #12 – pick_winner panics when zero participants ───────────────────────────
+
+#[test]
+#[should_panic]
+fn test_pick_winner_zero_participants_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_cid, client, _tc, token, creator) = setup_giveaway_env(&env, 100);
+
+    let giveaway_id = client.create_giveaway(
+        &creator,
+        &token,
+        &100,
+        &String::from_str(&env, "Empty"),
+        &60,
+        &1,
+        &None,
+    );
+
+    env.ledger().with_mut(|li| li.timestamp += 100);
+    // No one entered – must panic with NoParticipants.
+    client.pick_winner(&giveaway_id);
+}
+
+// ── #13 – Multi-winner equal-split gross shares ───────────────────────────────
+
+#[test]
+fn test_multi_winner_equal_split() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (contract_id, client, tc, token, creator) = setup_giveaway_env(&env, 0); // 0 % fee
+
+    // 4 winners, 400 tokens → each gets exactly 100.
+    let amount: i128 = 400;
+    let giveaway_id = client.create_giveaway(
+        &creator,
+        &token,
+        &amount,
+        &String::from_str(&env, "Equal Split"),
+        &60,
+        &4,
+        &None,
+    );
+
+    for _ in 0..4 {
+        client.enter_giveaway(&Address::generate(&env), &giveaway_id);
+    }
+    env.ledger().with_mut(|li| li.timestamp += 100);
+    client.pick_winner(&giveaway_id);
+
+    let winners: Vec<Address> = env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .get::<DataKey, Giveaway>(&DataKey::Giveaway(giveaway_id))
+            .unwrap()
+            .winners
+            .clone()
+    });
+
+    for i in 0..4u32 {
+        client.claim_prize(&giveaway_id, &winners.get(i).unwrap());
+        assert_eq!(
+            tc.balance(&winners.get(i).unwrap()),
+            100,
+            "each winner should receive 100 tokens"
+        );
+    }
+}
+
+// ── #14 – winner_count=0 panics with InvalidWinnerCount ──────────────────────
+
+#[test]
+#[should_panic]
+fn test_create_giveaway_zero_winner_count_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_cid, client, _tc, token, creator) = setup_giveaway_env(&env, 100);
+
+    client.create_giveaway(
+        &creator,
+        &token,
+        &500,
+        &String::from_str(&env, "Bad WC"),
+        &60,
+        &0, // winner_count = 0
+        &None,
+    );
+}
+
+// ── #15 – amount=0 is accepted (zero-prize giveaway) ─────────────────────────
+
+#[test]
+fn test_create_giveaway_zero_amount_accepted() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (contract_id, client, _tc, token, creator) = setup_giveaway_env(&env, 100);
+
+    let giveaway_id = client.create_giveaway(
+        &creator,
+        &token,
+        &0, // zero prize
+        &String::from_str(&env, "Zero Prize"),
+        &60,
+        &1,
+        &None,
+    );
+
+    // Giveaway is created and stored.
+    env.as_contract(&contract_id, || {
+        let g: Giveaway = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Giveaway(giveaway_id))
+            .unwrap();
+        assert_eq!(g.amount, 0);
+        assert_eq!(g.status, GiveawayStatus::Active);
+    });
+}
+
+// ── #16 – recover_unclaimed_prize: no fee deducted from recovered share ───────
+
+#[test]
+fn test_recover_unclaimed_returns_full_gross_share_no_fee() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (contract_id, client, tc, token, creator) = setup_giveaway_env(&env, 500); // 5 % fee
+
+    let amount: i128 = 200;
+    let giveaway_id = client.create_giveaway(
+        &creator,
+        &token,
+        &amount,
+        &String::from_str(&env, "Fee-Recovery"),
+        &60,
+        &1,
+        &None,
+    );
+
+    let winner = Address::generate(&env);
+    client.enter_giveaway(&winner, &giveaway_id);
+    env.ledger().with_mut(|li| li.timestamp += 100);
+    client.pick_winner(&giveaway_id);
+
+    let creator_before = tc.balance(&creator);
+
+    env.ledger()
+        .with_mut(|li| li.timestamp += 7 * 24 * 60 * 60 + 1);
+    client.recover_unclaimed_prize(&giveaway_id, &creator);
+
+    // Full gross share (200) is returned – no fee deduction on recovery.
+    let creator_after = tc.balance(&creator);
+    assert_eq!(
+        creator_after - creator_before,
+        amount,
+        "recovery must return the full gross share without fee deduction"
+    );
+
+    // No fee was collected.
+    env.as_contract(&contract_id, || {
+        let fees: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CollectedFees(token.clone()))
+            .unwrap_or(0);
+        assert_eq!(fees, 0, "no fees should be collected on recovery");
+    });
+}
+
+// ── #17 – creator reputation does NOT increment on recovery ──────────────────
+
+#[test]
+fn test_reputation_not_incremented_on_recovery() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (contract_id, client, _tc, token, creator) = setup_giveaway_env(&env, 100);
+
+    let giveaway_id = client.create_giveaway(
+        &creator,
+        &token,
+        &300,
+        &String::from_str(&env, "Rep Check"),
+        &60,
+        &1,
+        &None,
+    );
+
+    let winner = Address::generate(&env);
+    client.enter_giveaway(&winner, &giveaway_id);
+    env.ledger().with_mut(|li| li.timestamp += 100);
+    client.pick_winner(&giveaway_id);
+
+    env.ledger()
+        .with_mut(|li| li.timestamp += 7 * 24 * 60 * 60 + 1);
+    client.recover_unclaimed_prize(&giveaway_id, &creator);
+
+    // Reputation must remain at 0 — only claim_prize triggers it.
+    env.as_contract(&contract_id, || {
+        let rep: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Reputation(creator.clone()))
+            .unwrap_or(0);
+        assert_eq!(rep, 0, "creator reputation must not increment on recovery");
+    });
+}
+
+// ── #18 – finalize_manual_winners panics if list contains a non-participant ───
+
+#[test]
+#[should_panic]
+fn test_manual_winners_non_participant_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_cid, client, _tc, token, creator) = setup_giveaway_env(&env, 100);
+
+    let giveaway_id = client.create_giveaway_with_selection(
+        &creator,
+        &token,
+        &500,
+        &String::from_str(&env, "Manual NP"),
+        &60,
+        &1,
+        &None,
+        &SelectionMethod::Manual,
+    );
+
+    let real_participant = Address::generate(&env);
+    let outsider = Address::generate(&env);
+    client.enter_giveaway(&real_participant, &giveaway_id);
+
+    env.ledger().with_mut(|li| li.timestamp += 100);
+
+    // Pass `outsider` (not a participant) as the sole winner – must panic.
+    let mut winner_list = Vec::new(&env);
+    winner_list.push_back(outsider);
+    client.finalize_manual_winners(&creator, &giveaway_id, &winner_list);
+}
+
+// ── #19 – finalize_manual_winners panics if list has duplicate addresses ──────
+
+#[test]
+#[should_panic]
+fn test_manual_winners_duplicate_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_cid, client, _tc, token, creator) = setup_giveaway_env(&env, 100);
+
+    let giveaway_id = client.create_giveaway_with_selection(
+        &creator,
+        &token,
+        &500,
+        &String::from_str(&env, "Manual Dup"),
+        &60,
+        &2,
+        &None,
+        &SelectionMethod::Manual,
+    );
+
+    let p1 = Address::generate(&env);
+    let p2 = Address::generate(&env);
+    client.enter_giveaway(&p1, &giveaway_id);
+    client.enter_giveaway(&p2, &giveaway_id);
+
+    env.ledger().with_mut(|li| li.timestamp += 100);
+
+    // Same address twice → must panic.
+    let mut winner_list = Vec::new(&env);
+    winner_list.push_back(p1.clone());
+    winner_list.push_back(p1.clone());
+    client.finalize_manual_winners(&creator, &giveaway_id, &winner_list);
+}
+
+// ── #20 – finalize_merit_winners on a Random giveaway panics ─────────────────
+
+#[test]
+#[should_panic]
+fn test_finalize_merit_winners_on_random_giveaway_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (_cid, client, _tc, token, creator) = setup_giveaway_env(&env, 100);
+
+    // Default create_giveaway uses SelectionMethod::Random.
+    let giveaway_id = client.create_giveaway(
+        &creator,
+        &token,
+        &500,
+        &String::from_str(&env, "Wrong Method"),
+        &60,
+        &1,
+        &None,
+    );
+
+    let participant = Address::generate(&env);
+    client.enter_giveaway(&participant, &giveaway_id);
+    env.ledger().with_mut(|li| li.timestamp += 100);
+
+    // Must panic – giveaway method is Random, not Merit.
+    client.finalize_merit_winners(&creator, &giveaway_id);
+}
