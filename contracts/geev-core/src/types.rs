@@ -36,6 +36,7 @@ pub enum Error {
     ClaimWindowNotExpired = 27,
     AlreadyClaimed = 28,
     NotWinner = 29,
+    InvalidFee = 31,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -50,6 +51,7 @@ pub enum GiveawayStatus {
     ResolvedRelease = 5,
     ResolvedRefund = 6,
     UnderAppeal = 7,
+    Cancelled = 8,
 }
 
 #[derive(Clone)]
@@ -66,6 +68,8 @@ pub enum SelectionMethod {
     Random = 0,
     Manual = 1,
     Merit = 2,
+    /// Winners are the first `winner_count` entrants, in registration order.
+    FirstCome = 3,
 }
 
 #[derive(Clone)]
@@ -89,6 +93,9 @@ pub struct Giveaway {
     pub claim_deadline: u64,
     /// Number of winners who have successfully called `claim_prize`.
     pub claimed_count: u32,
+    /// Optional per-giveaway fee override in basis points.
+    /// When `Some`, takes precedence over token and global fees at claim time.
+    pub fee_bps: Option<u32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,6 +147,8 @@ pub enum DataKey {
     Donation(u64, Address),
     Admin,
     Fee,
+    /// Optional per-token fee in basis points; takes precedence over global `Fee`.
+    TokenFee(Address),
     CollectedFees(Address),
     AllowedToken(Address),
     Profile(Address),
@@ -147,6 +156,8 @@ pub enum DataKey {
     FlagRecord(ContentType, u64, Address),
     FlagCount(ContentType, u64),
     Reputation(Address),
+    /// Ledger timestamp when reputation was last written (after increment, slash, or decay).
+    ReputationUpdatedAt(Address),
     // ─── Dispute Tracking ──────────────────────────────────────────────────
     DisputeRaisedAt(u64),          // timestamp when dispute was raised
     DisputeRaisedBy(u64, Address), // who raised the dispute

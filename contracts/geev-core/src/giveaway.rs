@@ -3,7 +3,7 @@ use crate::profile::ProfileContract;
 use crate::types::{
     DataKey, Error, Giveaway, GiveawayStatus, ParticipantVerification, SelectionMethod,
 };
-use crate::utils::with_reentrancy_guard;
+use crate::utils::{resolve_fee_bps, validate_fee, with_reentrancy_guard};
 use soroban_sdk::{
     contract, contractevent, contractimpl, panic_with_error, token, Address, Env, String, Vec,
 };
@@ -61,6 +61,7 @@ impl GiveawayContract {
         duration_seconds: u64,
         winner_count: u32,
         verification: Option<ParticipantVerification>,
+        fee_bps: Option<u32>,
     ) -> u64 {
         Self::create_giveaway_with_selection(
             env,
@@ -72,6 +73,7 @@ impl GiveawayContract {
             winner_count,
             verification,
             SelectionMethod::Random,
+            fee_bps,
         )
     }
 
@@ -86,11 +88,16 @@ impl GiveawayContract {
         winner_count: u32,
         verification: Option<ParticipantVerification>,
         selection_method: SelectionMethod,
+        fee_bps: Option<u32>,
     ) -> u64 {
         creator.require_auth();
 
         if winner_count == 0 {
             panic_with_error!(&env, Error::InvalidWinnerCount);
+        }
+
+        if let Some(fee) = fee_bps {
+            validate_fee(&env, fee);
         }
 
         // Check if token is whitelisted
@@ -130,6 +137,7 @@ impl GiveawayContract {
             selection_method,
             claim_deadline: 0,
             claimed_count: 0,
+            fee_bps,
         };
 
         if let Some(verification) = &verification {
@@ -189,7 +197,54 @@ impl GiveawayContract {
         env.storage().persistent().set(&index_key, &participant);
 
         giveaway.participant_count += 1;
+
+        // First-come: provisionally mark the entrant as a winner while slots remain.
+        // Status stays Active until `finalize_first_come_winners` after end_time.
+        if giveaway.selection_method == SelectionMethod::FirstCome
+            && giveaway.winners.len() < giveaway.winner_count
+        {
+            giveaway.winners.push_back(participant.clone());
+        }
+
         env.storage().persistent().set(&giveaway_key, &giveaway);
+    }
+
+    /// Cancel an active giveaway before anyone has entered and return its
+    /// entire escrowed prize to the creator.
+    ///
+    /// Cancellation is deliberately unavailable after the first entry or
+    /// after winner selection. This prevents a creator from withdrawing a
+    /// prize after participants have begun relying on the campaign.
+    pub fn cancel_giveaway(env: Env, creator: Address, giveaway_id: u64) {
+        creator.require_auth();
+
+        with_reentrancy_guard(&env, || {
+            let giveaway_key = DataKey::Giveaway(giveaway_id);
+            let mut giveaway: Giveaway = env
+                .storage()
+                .persistent()
+                .get(&giveaway_key)
+                .unwrap_or_else(|| panic_with_error!(&env, Error::GiveawayNotFound));
+
+            if giveaway.creator != creator {
+                panic_with_error!(&env, Error::NotCreator);
+            }
+            if giveaway.status != GiveawayStatus::Active || giveaway.participant_count != 0 {
+                panic_with_error!(&env, Error::InvalidStatus);
+            }
+
+            // Persist the terminal state before the external token call. Soroban
+            // rolls this write back if the transfer fails.
+            giveaway.status = GiveawayStatus::Cancelled;
+            env.storage().persistent().set(&giveaway_key, &giveaway);
+
+            let token_client = token::Client::new(&env, &giveaway.token);
+            token_client.transfer(
+                &env.current_contract_address(),
+                &giveaway.creator,
+                &giveaway.amount,
+            );
+        })
     }
 
     fn verify_participant(env: &Env, giveaway: &Giveaway, participant: &Address) {
@@ -344,8 +399,7 @@ impl GiveawayContract {
                 panic_with_error!(&env, Error::AlreadyClaimed);
             }
 
-            let fee_key = DataKey::Fee;
-            let fee_bps: u32 = env.storage().instance().get(&fee_key).unwrap_or(100); // Default to 100 bps (1%)
+            let fee_bps = resolve_fee_bps(&env, &giveaway);
 
             let gross_share =
                 Self::winner_gross_share(&env, giveaway.amount, giveaway.winner_count, index);
@@ -444,6 +498,8 @@ impl GiveawayContract {
         if env.storage().instance().has(&admin_key) {
             panic_with_error!(&env, Error::AlreadyInitialized);
         }
+
+        validate_fee(&env, fee_bps);
 
         // Store admin address
         env.storage().instance().set(&admin_key, &admin);
@@ -634,6 +690,44 @@ impl GiveawayContract {
         winners
             .first()
             .unwrap_or_else(|| panic_with_error!(env, Error::NoParticipants))
+    }
+
+    /// Finalize a first-come giveaway after `end_time`.
+    ///
+    /// Winners are the first `winner_count` participants in registration order
+    /// (`ParticipantIndex` 0..winner_count-1). Entrants beyond that count remain
+    /// participants but are not winners. Payout uses the shared claim lifecycle.
+    pub fn finalize_first_come_winners(env: Env, giveaway_id: u64) -> Address {
+        let giveaway_key = DataKey::Giveaway(giveaway_id);
+        let giveaway: Giveaway = env
+            .storage()
+            .persistent()
+            .get(&giveaway_key)
+            .unwrap_or_else(|| panic_with_error!(&env, Error::GiveawayNotFound));
+
+        if giveaway.selection_method != SelectionMethod::FirstCome {
+            panic_with_error!(&env, Error::InvalidStatus);
+        }
+
+        Self::ensure_ready_for_selection(&env, &giveaway);
+
+        let winners = Self::select_first_come_winners(&env, giveaway_id, giveaway.winner_count);
+        Self::finalize_winners(&env, &giveaway_key, giveaway, winners)
+    }
+
+    /// Select winners as the first `winner_count` entrants by registration index.
+    fn select_first_come_winners(env: &Env, giveaway_id: u64, winner_count: u32) -> Vec<Address> {
+        let mut winners = Vec::new(env);
+        for i in 0..winner_count {
+            let participant_key = DataKey::ParticipantIndex(giveaway_id, i);
+            let winner: Address = env
+                .storage()
+                .persistent()
+                .get(&participant_key)
+                .unwrap_or_else(|| panic_with_error!(env, Error::InvalidIndex));
+            winners.push_back(winner);
+        }
+        winners
     }
 
     /// Finalize a giveaway with manually selected winners
